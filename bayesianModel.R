@@ -1,3 +1,6 @@
+# Build and run Bayesian GLMs for three stability metrics with ecosystem characteristics, dsiturbance legacy and climate legacy as explanaotry variables. 
+# Author: Liezl M. Vermeulen
+
 # Install and load required packages
 library(spBayes) 
 library (raster)
