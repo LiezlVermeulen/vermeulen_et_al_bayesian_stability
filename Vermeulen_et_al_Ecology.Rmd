@@ -1,0 +1,775 @@
+---
+title: "Vermeulen_et_al_2024_Ecology"
+author: "Liezl M Vermeulen"
+date: "2024-09-11"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+Check if `getwd()` returns the correct working directory (the folder where this .Rmd file is stored).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE)
+knitr::opts_knit$set(echo=TRUE, root.dir="C:/Users/u0142455/Documents/PhD/Processing/ch2")
+getwd()
+```
+
+# Bayesian Generalised Linear Models (GLMs) for ecosystem stability
+
+# 1 Introduction
+
+This R markdown tutorial describes the code used to carry out the analysis for the paper "Disentangling climate and disturbance legacy effects on savanna stability".
+
+The objectives of this analysis are:
+
+-   Quantify savanna resistance and resilience to drought using remote sensing
+
+-   Determine the ecosystem characteristics, climate legacy, and local disturbance pressures that affect savanna drought resistance and resilience using Bayesian Generalised Linear Models (GLMs)
+
+# 2 Packages
+
+We begin by taking care of the packages we need for this session. This piece of code first creates a list containing the required packages and then runs them through a for-loop to check if they are installed or not. If a package is not installed yet, it will be installed with the `install.packages()` function. Afterwards, all the required packages are loaded with the `library()` function.
+
+```{r}
+# Create a list with the required packages
+requiredPackages <- c("raster", "rgdal", "rts", "terra", "spdep", "brms", "ggplot2", "matrixStats", "dplyr", "tidyr", "car", "tidybayes", "effects")
+
+# Check if required packages are installed; if a package is not installed, install it; then load the packages
+for (package in requiredPackages) {
+  if (!require(package, character.only=TRUE)) {
+    install.packages(package)
+  }
+  library(package, character.only=TRUE)
+}
+```
+
+# 3 Settings
+
+Next, we make sure that we are able to import the provided data easily. Modify `wd` to provide the correct path to your main working directory.
+
+## 3.1 Response metrics
+
+The NDVI time series data for calculating resistance and resilience is loaded from `wd.ndvi`, while the intermediary response metric results are saved to `wd.response`.
+
+## 3.2 Bayesian GLMs
+
+The ecosystem characteristics, climate legacy and disturbance legacy input files are loaded from `wd.eco`, `wd.dist` and `wd.climate` respectively. Finally, save our results in `wd.results`.
+
+```{r, cache=TRUE}
+getwd()
+
+wd_ndvi <- 'C:/Users/u0142455/OneDrive - KU Leuven/PhD/Processing/ch2/data/modis/mod13/VI_Monthly_1Km_v6/NDVI'
+wd_response <- './data/response_metrics'
+wd_eco <- './data/ecosys_char'
+wd_dist <- './data/disturbance'
+wd_climate <- './data/climate'
+
+wd_results <- './data/results'
+
+# Load your study area shapefile
+knp <- shapefile('./data/aoi/knp.shp')
+```
+
+# 4 Load data
+
+## 4.1 Response metrics
+
+In this analysis, we use [MODIS](https://lpdaac.usgs.gov/data/get-started-data/collection-overview/missions/modis-overview/) imagery, specifically the [MOD13A3](https://lpdaac.usgs.gov/products/mod13a3v061/) product. The MOD13A3 product provides monthly composites for two Vegetation Indices (VIs) at a spatial resolution of 1 km x 1 km. The first is the Normalized Difference Vegetation Index (NDVI) and the second one is the Enhanced Vegetation Index (EVI), which has improved sensitivity over high biomass regions. We will use NDVI time series data in this session.
+
+We load the monthly NDVI time series data from 2000 to 2022 as a Raster Stack.
+
+```{r, cache=TRUE}
+# Load files NDVI raster stack
+ndvi_files <- list.files(path = wd_ndvi, pattern="*.tif", full.names=TRUE, recursive=FALSE)
+ndvi_stack <- stack(ndvi_files)
+
+modis_crs <- crs(ndvi_stack)
+knp_prj <- spTransform(knp, modis_crs)
+ndvi_crop <- crop(ndvi_stack, knp_prj)
+
+ndvi_scaled <- stack(ndvi_crop * 0.0001) # apply scale factor
+
+```
+
+## 4.2 Bayesian GLMs
+
+A wide range of data sources were used as input for the explanatory variables fo the Bayesian GLMs, representing underlying ecosystem characteristics, climate legacy and disturbance legacy. Load in the respective datasets and subset the legacy data to select relevant years to match the corresponding response variables, i.e. 2000 - 2015 for the resistance/resilience and 1986 - 2015 for the woody cover change data.
+
+```{r}
+
+# scaling factors required for SoilGrids datasets
+carbon_factor <- 10 
+sand_factor <- 10
+clay_factor <- 10
+
+# Ecosystem characteristics
+soil_carbon <- raster(file.path(wd_eco, "soil/SoilGrids/soilCarbon_250m_KNP_utm.tif")) / carbon_factor
+soil_sand <- raster(file.path(wd_eco, "soil/SoilGrids/soilSand_250m_KNP_utm.tif")) / sand_factor
+soil_clay <- raster(file.path(wd_eco, "soil/SoilGrids/soilClay_250m_KNP_utm.tif")) / clay_factor
+geology <- shapefile(file.path(wd_eco, "soil/basalt_granite.shp"))
+elev <- raster(file.path(wd_eco, "terrain/elev_knp_utm.tif"))
+slope <- raster(file.path(wd_eco, "terrain/slope_knp_utm.tif"))
+twi <- raster(file.path(wd_eco, "terrain/twi_knp_utm.tif"))
+woodyCov <- raster(file.path(wd_eco,"woody_cov/woodyCover_Venter2017.tif"))
+
+# Climate legacy
+# 1981 - 2015
+drought <- stack(file.path(wd_climate, "spi/spi12_drought_sev_stack.tif")) 
+drought_sum_2015 <- abs(sum(drought[[20:34]])) # 2000- 2015: resistance/resilience)
+drought_sum_full <- abs(sum(drought[[6:35]])) # 1986 - 2015: woody cover change
+
+wetness <- stack(file.path(wd_climate, "spi/spi12_wetness_sev_stack.tif"))
+wetness_sum_2015 <- abs(sum(wetness[[20:35]])) # 2000- 2015: resistance/resilience
+wetness_sum_full <- abs(sum(wetness[[6:35]])) # 1986 - 2015: woody cover change
+
+# Disturbance legacy
+elephant <- raster(file.path(wd_dist, "elephants/elephant_impact_heatmap.tif")) / 100
+fire_freq_files <- list.files(path=paste0(wd_dist,"/fire/output/fire_freq"),pattern="*.tif", full.names=TRUE, recursive=FALSE) 
+fire_freq <- stack(fire_freq_files)
+fire_freq_sum_2015 <- sum(fire_freq[[58:73]]) # 2000- 2015: resistance/resilience
+fire_freq_sum_full <- sum(fire_freq[[44:73]]) # 1986 - 2015: woody cover change
+```
+
+# 5 Response metrics
+
+This section focuses on quantifying resistance and resilience to drought using an NDVI time series.
+
+## 5.1 Resistance
+
+Resistance is related to how well an ecosystem can withstand a disturbance event, i.e., how low is the magnitude of change in the NDVI time series due to a disturbance event (Lloret et al., 2007). Higher values indicate a more severe impact on the ecosystem, thus lower resistance (De Keersmaecker et al., 2014). Resistance is calculated from the NDVI anomaly time series, which is generated by removing the seasonal component, i.e., the long-term mean NDVI for a particular month of the year. The seasonal component incorporates phenological variation through time, which could potentially mask signals of stability (De Keersmaecker et al., 2015). The NDVI anomaly $ts_{A}$ is calculated from a time series $ts$ with $N$ observations from time $t_{1}$ to $t_{N}$ as follows:
+
+$$
+ts_{A}(t_{i}) = ts(t_{i}) - ts_{s}(t_{i})
+$$
+
+where
+
+$$
+ts_{s}(t_{i}) = mean_{u \in m}[ts(t_{i})]
+$$
+
+where $ts_{s}(t_{i})$ is the seasonal component and $mean_{u \in m}[ts(t_{i})]$ is the mean NDVI for all dates $u$, across the entire time period (2000 -- 2022), falling within month $m$. Resistance to the 2015/2016 drought was subsequently calculated according to Lloret et al. (2007), which is bounded between 0 and 1:
+
+$$
+R(t_{i}) = 1 - \frac{ts_{A}(t_{i})}{ts_{s}(t_{i})}
+$$
+
+Resistance is normalised using the seasonal component to account for variations in biomass. To ease interpretation, the value was also inverted so that higher absolute values correspond to a more resistant and stable ecosystem. A single resistance value per pixel location was then obtained by computing the minimum absolute $R(t_{i})$ value for the growing season of the 2015/2016 drought, namely October 2015 to March 2016.
+
+## 5.2 Resilience
+
+Resilience is defined as the rate of return of a system to its equilibrium state after a perturbation (Pimm, 1984). The temporal relationship between observations serves as a resilience metric and can be quantified by the temporal autocorrelation at lag-1 ($\rho_{1}$), where higher $\rho_{1}$ values indicate more similar subsequent anomalies, and thus, a slower return to equilibrium. Therefore, resilience can be expressed as $1 - \rho_{1}$ (Dakos et al., 2012) and is bounded between 0 and 1: $$
+1 - \rho_{1} = 1 - \frac{\sum_{i=2}^{N}(ts_{A}(t_{i})-\overline{ts_{A}})(ts_{A}(t_{i-1})-\overline{ts_{A}})}{\sum_{i=1}^{N}(ts_{A}(t_{i})-ts_{A})^2}
+$$
+
+where the anomaly time series is given by $ts_{A}$. Ecosystems with low resilience exhibit a slower return to equilibrium, whereas those with high resilience recover more quickly (De Keersmaecker et al., 2014). A single resilience value per pixel location was then obtained by computing the $1 - \rho_{1}$ value for the three years following the drought.
+
+```{r, cache=TRUE}
+# Set the disturbance period start and end. In this case, the drought occurred in the growing season of the 2015/2016 i.e. Oct 2015 - March 2016
+disturbance_time <- c(2015,10)
+disturbance_end_time <- c(2016,3)
+xresponse <- function(data,thrs) {
+  r<-data
+  m<-na.approx(as.matrix(r))
+  resistance=c()
+  resilience=c()
+  variance=c()
+  for (x in 1:ncell(r)){
+    
+    if(sum(is.na(m[x,]))<thrs){  
+      pix=c()
+      for (i in 1:nlayers(r)){
+        pix[i]<-as.vector(m[x,i])
+      }
+      pix_full <- append(NA,pix) # MODIS is missing the month of January 2000, add in as NA value
+      ndvi_ts <- ts(pix_full, start=c(2000,1), end=c(2022, 12), frequency=12)
+      pix_m <- matrix(pix_full[1:120], 10, byrow = TRUE) # create matrix, ordered according to the number of years 
+      means <- colMeans(pix_m, na.rm=TRUE) # calculate the mean of every time step i.e. month
+      sd <- colSds(pix_m, na.rm=TRUE)
+      seasonality <- rep(means, 23) # duplicate for all years to get the seasonality
+      
+      ## Anomaly
+      anomaly <- pix_full - seasonality
+      anomaly_ts <- ts(anomaly, start=c(2000,1), end=c(2022, 12), frequency=12)
+      anomaly_norm <- anomaly / seasonality # normalised anomaly
+      anomaly_norm_ts <- ts(anomaly_norm, start=c(2000,1), end=c(2022, 12), frequency=12)
+      
+      # Resistance
+      # extract the NDVI naomaly time series for the disturbance period
+      disturbance_data <- window(anomaly_norm_ts, start = disturbance_time, end = disturbance_end_time)
+      
+      # minimum NDVI anomly value within the disutrbance period
+      resist <- abs(min(disturbance_data)) 
+      # date of minimum value, to calculate resilience from
+      year <- floor(time(disturbance_data)[which.max(disturbance_data)])
+      month <- (time(disturbance_data)[which.min(disturbance_data)] %% 1)*12
+      
+      if (resist < 0 || resist > 1) {
+        resistance[x] <- NA
+      } else {
+        resistance[x] <- 1 - resist
+      }
+      
+      # Resilience
+      # extract NDVI anomaly post-disturbance for x years
+      recovery_years <- 3
+      post_disturbance_data <- window(anomaly_ts, start = c(as.numeric(year),as.numeric(month)+1), end = c(as.numeric(year) + recovery_years , as.numeric(month)+1))
+      
+      #acf_post <- mean(window(acf, start = disturbance_end_time, end = recovery_end_time))
+      # calculate autocorrelation at lag-1
+      autocorrelation_lag1 <- (acf(post_disturbance_data, lag.max = 1, plot = FALSE)$acf[2])
+      if (autocorrelation_lag1 < 0) {
+        resilience[x] <- NA
+      } else {
+        resilience[x] <- 1 - autocorrelation_lag1
+      }
+      
+      
+      # Variance (pre-drought)
+      anomaly_pre <- window(anomaly_ts, end = disturbance_time)
+      variance[x] <- sd(as.numeric(anomaly_pre), na.rm=TRUE) 
+      
+    } else {
+      resistance[x] <- NA
+      resilience[x] <- NA
+      variance[x] <- NA
+    }
+  }
+  results<-list(resistance, resilience, variance, time)
+  names(results)<-c("resistance","resilence","variance", "time")
+    
+  resist_raster<-raster(extent(r),nrow=nrow(r),ncol=ncol(r),crs=proj4string(r))
+  values(resist_raster)<-results[[1]]
+    
+  resil_raster<-raster(extent(r),nrow=nrow(r),ncol=ncol(r),crs=proj4string(r))
+  values(resil_raster)<-results[[2]]
+    
+  var_raster<-raster(extent(r),nrow=nrow(r),ncol=ncol(r),crs=proj4string(r))
+  values(var_raster)<-results[[3]]
+    
+  output<-list(resist_raster,resil_raster,var_raster)
+  return(output)
+  
+}
+
+response_r <-  xresponse(data=ndvi_scaled, thrs=12)
+resistance <- response_r[[1]]
+resilience <- response_r[[2]]
+plot(mask(resistance, knp_prj)) # resistance
+plot(mask(resilience, knp_prj)) # resilience
+
+#writeRaster(response_r[[1]], file.path(wd_response, "resistance.tif"), format = "GTiff", overwrite = TRUE)
+#writeRaster((response_r[[2]]), file.path(wd_response, "resilience.tif"), format = "GTiff", overwrite = TRUE)
+#writeRaster(response_r[[3]], file.path(wd_response, "variance.tif"), format = "GTiff", overwrite = TRUE)
+
+```
+
+# 6 Bayesian GLMs
+
+## 6.1 Pre-processing and set-up
+
+Perform some pre-processing steps, including projecting all datasets to the same resolution and coordinate reference system and cropping to the same extent. These steps are unnecessary if your datasets already align in terms of coordinate reference system, spatial resolution and extent.
+
+```{r}
+
+knp <- shapefile("./data/aoi/knp_reproj.shp")
+
+# Project everything to CHIRPS spatial resolution, local crs
+chirps_crs <- crs(drought_sum_2015)
+utm_crs <- crs(fire_freq)
+
+# Load saved response layers if necessary
+resistance <- raster(file.path(wd_response,"new/resistance.tif"))
+resilience <- raster(file.path(wd_response,"new/resilience.tif"))
+
+# Use one layer as the base layer
+resistance_rp <- mask(projectRaster(resistance, res=c(1000,1000), crs=utm_crs, method="bilinear"), knp)
+base_r <- resistance_rp
+
+# Reproject and crop all layers to the same crs and extent
+resilience_rp <- mask(projectRaster(resilience, base_r, method="bilinear"), knp)
+
+fire_freq_2015_rp <- round(mask(projectRaster(fire_freq_sum_2015, base_r, method="bilinear"), knp))
+fire_freq_full_rp <- round(mask(projectRaster(fire_freq_sum_full, base_r, method="bilinear"), knp))
+elephant_rp <- mask(projectRaster(elephant, base_r, method="bilinear"), knp)
+
+drought_2015_rp <- mask(projectRaster(drought_sum_2015, base_r, method="bilinear"), knp)
+drought_full_rp <- mask(projectRaster(drought_sum_full, base_r, method="bilinear"), knp)
+wetness_2015_rp <- mask(projectRaster(wetness_sum_2015, base_r, method="bilinear"), knp)
+wetness_full_rp <- mask(projectRaster(wetness_sum_full, base_r, method="bilinear"), knp)
+
+elev_rp <- mask(projectRaster(elev, base_r, method="bilinear"), knp)
+slope_rp <- mask(projectRaster(slope, base_r, method="bilinear"), knp)
+twi_rp <- mask(projectRaster(twi, base_r, method="bilinear"), knp)
+soil_sand_rp <- mask(projectRaster(soil_sand, base_r, method="bilinear"), knp)
+soil_carbon_rp <- mask(projectRaster(soil_carbon, base_r, method="bilinear"), knp)
+soil_clay_rp <- mask(projectRaster(soil_clay, base_r, method="bilinear"), knp)
+woodyCov_rp <- mask(projectRaster(woodyCov, base_r, method="bilinear"), knp)
+
+geology_rp <- mask(rasterize(as(geology, "SpatVector"), rast(base_r), field="GEOLOGY"), vect(knp))
+
+# Set up list of rasters and corresponding names
+r_names <- c("resist" , "resil",
+             "elev", "slope", "twi", "soilSand", "soilClay", "soilCarbon",
+             "woodyCov", "geology", "fireFreq2015", "fireFreqFull", "elephant",
+             "drought2015","droughtFull", "wetness2015", "wetnessFull")
+
+r_list <- c(rast(resistance_rp), rast(resilience_rp),
+            rast(elev_rp), rast(slope_rp), rast(twi_rp), rast(soil_sand_rp),
+            rast(soil_clay_rp), rast(soil_carbon_rp), rast(woodyCov_rp), 
+            geology_rp, rast(fire_freq_2015_rp), rast(fire_freq_full_rp), 
+            rast(elephant_rp), rast(drought_2015_rp), rast(drought_full_rp), 
+            rast(wetness_2015_rp), rast(wetness_full_rp))
+
+names(r_list) <- r_names
+
+# Stack rasters
+model_stack <- r_list
+
+# Mask out rivers and areas within a 750m buffer
+rivers <- mtq <- st_read("./data/rivers/buffer_rivers_750m.shp") %>% 
+  dplyr::summarise() 
+
+mask <- st_bbox(model_stack) %>% # take extent of your raster
+  st_as_sfc() %>% # make it a sf object
+  st_set_crs(st_crs(mtq)) %>% # in CRS of your polygon 
+  st_difference(mtq) %>% # intersect with the polygon object
+  st_as_sf() # interpret as sf (and not sfc) object
+
+model_stack_masked <- model_stack %>% 
+  mask(mask)
+
+# Create model data frame
+model_df <- as.data.frame(model_stack_masked,xy=TRUE)
+
+# Create a copy of your original dataframe for further processing
+model_df2 <- cbind(ID = 1:nrow(model_df), model_df)
+model_df2 <- na.omit(model_df2)
+
+# scale and center all numerical explanatory variables
+model_df2[,6:20] <- model_df2[,6:20] %>% mutate(across(where(is.numeric), scale))
+
+```
+
+## 6.2 Multicolilnearity analysis
+
+First create the functions for calculating the variance inflation factor (VIF), as adapted from Zuur et al. (2010). Run this code block to generate the necessary functions.
+
+```{r}
+# Functions for calculating VIF, as adapted from Zuur et al. (2010)
+
+panel.cor <- function(x, y, digits=1, prefix="", cex.cor)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(0, 1, 0, 1))
+  r1=cor(x,y,use="pairwise.complete.obs")
+  r <- abs(cor(x, y,use="pairwise.complete.obs"))
+  
+  txt <- format(c(r1, 0.123456789), digits=digits)[1]
+  txt <- paste(prefix, txt, sep="")
+  if(missing(cex.cor)) cex <- 0.9/strwidth(txt)
+  text(0.5, 0.5, txt, cex = cex * r)
+}
+
+panel.smooth2=function (x, y, col = par("col"), bg = NA, pch = par("pch"),
+                        cex = 1, col.smooth = "red", span = 2/3, iter = 3, ...)
+{
+  points(x, y, pch = pch, col = col, bg = bg, cex = cex)
+  ok <- is.finite(x) & is.finite(y)
+  if (any(ok))
+    lines(stats::lowess(x[ok], y[ok], f = span, iter = iter),
+          col = 1, ...)
+}
+
+
+panel.lines2=function (x, y, col = par("col"), bg = NA, pch = par("pch"),
+                       cex = 1, ...)
+{
+  points(x, y, pch = pch, col = col, bg = bg, cex = cex)
+  ok <- is.finite(x) & is.finite(y)
+  if (any(ok)){
+    tmp=lm(y[ok]~x[ok])
+    abline(tmp)}
+  
+}
+
+
+
+
+panel.hist <- function(x, ...)
+{
+  usr <- par("usr"); on.exit(par(usr))
+  par(usr = c(usr[1:2], 0, 1.5) )
+  h <- hist(x, plot = FALSE)
+  breaks <- h$breaks; nB <- length(breaks)
+  y <- h$counts; y <- y/max(y)
+  rect(breaks[-nB], 0, breaks[-1], y, col="white", ...)
+}
+
+
+
+#VIF
+myvif <- function(mod) {
+  v <- vcov(mod)
+  assign <- attributes(model.matrix(mod))$assign
+  if (names(coefficients(mod)[1]) == "(Intercept)") {
+    v <- v[-1, -1]
+    assign <- assign[-1]
+  } else warning("No intercept: vifs may not be sensible.")
+  terms <- labels(terms(mod))
+  n.terms <- length(terms)
+  if (n.terms < 2) stop("The model contains fewer than 2 terms")
+  if (length(assign) > dim(v)[1] ) {
+    diag(tmp_cor)<-0
+    if (any(tmp_cor==1.0)){
+      return("Sample size is too small, 100% collinearity is present")
+    } else {
+      return("Sample size is too small")
+    }
+  }
+  R <- cov2cor(v)
+  detR <- det(R)
+  result <- matrix(0, n.terms, 3)
+  rownames(result) <- terms
+  colnames(result) <- c("GVIF", "Df", "GVIF^(1/2Df)")
+  for (term in 1:n.terms) {
+    subs <- which(assign == term)
+    result[term, 1] <- det(as.matrix(R[subs, subs])) * det(as.matrix(R[-subs, -subs])) / detR
+    result[term, 2] <- length(subs)
+  }
+  if (all(result[, 2] == 1)) {
+    result <- data.frame(GVIF=result[, 1])
+  } else {
+    result[, 3] <- result[, 1]^(1/(2 * result[, 2]))
+  }
+  invisible(result)
+}
+
+corvif <- function(dataz) {
+  dataz <- as.data.frame(dataz)
+  #correlation part
+  cat("Correlations of the variables\n\n")
+  tmp_cor <- cor(dataz,use="complete.obs")
+  print(tmp_cor)
+  
+  #vif part
+  form    <- formula(paste("fooy ~ ",paste(strsplit(names(dataz)," "),collapse=" + ")))
+  dataz   <- data.frame(fooy=1,dataz)
+  lm_mod  <- lm(form,dataz)
+  
+  cat("\n\nVariance inflation factors\n\n")
+  print(myvif(lm_mod))
+}
+
+myvif <- function(mod) {
+  v <- vcov(mod)
+  assign <- attributes(model.matrix(mod))$assign
+  if (names(coefficients(mod)[1]) == "(Intercept)") {
+    v <- v[-1, -1]
+    assign <- assign[-1]
+  } else warning("No intercept: vifs may not be sensible.")
+  terms <- labels(terms(mod))
+  n.terms <- length(terms)
+  if (n.terms < 2) stop("The model contains fewer than 2 terms")
+  if (length(assign) > dim(v)[1] ) {
+    diag(tmp_cor)<-0
+    if (any(tmp_cor==1.0)){
+      return("Sample size is too small, 100% collinearity is present")
+    } else {
+      return("Sample size is too small")
+    }
+  }
+  R <- cov2cor(v)
+  detR <- det(R)
+  result <- matrix(0, n.terms, 3)
+  rownames(result) <- terms
+  colnames(result) <- c("GVIF", "Df", "GVIF^(1/2Df)")
+  for (term in 1:n.terms) {
+    subs <- which(assign == term)
+    result[term, 1] <- det(as.matrix(R[subs, subs])) * det(as.matrix(R[-subs, -subs])) / detR
+    result[term, 2] <- length(subs)
+  }
+  if (all(result[, 2] == 1)) {
+    result <- data.frame(GVIF=result[, 1])
+  } else {
+    result[, 3] <- result[, 1]^(1/(2 * result[, 2]))
+  }
+  invisible(result)
+}
+
+
+
+corvif <- function(dataz) {
+  dataz <- as.data.frame(dataz)
+  #correlation part
+  cat("Correlations of the variables\n\n")
+  tmp_cor <- cor(dataz,use="complete.obs")
+  print(tmp_cor)
+  
+  #vif part
+  form    <- formula(paste("fooy ~ ",paste(strsplit(names(dataz)," "),collapse=" + ")))
+  dataz   <- data.frame(fooy=1,dataz)
+  lm_mod  <- lm(form,dataz)
+  
+  cat("\n\nVariance inflation factors\n\n")
+  print(myvif(lm_mod))
+}
+```
+
+Next iteratively compute the VIF, removing the variable with the highest VIF, until all explanatory variables have a VIF \< 3. Only four iterations were necessary, leading to the exclusion of elevation, soil carbon and soil pH.
+
+```{r}
+# Select covariates
+Z <- model_df2[,c("slope", "soilSand", "soilClay", "soilCarbon", "woodyCov",  
+                  "fireFreq2015", "elephant",
+                  "drought2015", "wetness2015")]
+
+corvif(Z)
+```
+
+## 6.3 Build Bayesian GLMs
+
+Each of the response metrics served as an independent response variable in three distinct stability models. We employed Bayesian Generalised Linear Models (GLMs), a statistical approach that accommodates complex data structures and varying levels of uncertainty, to investigate the relationship between our response metrics and various environmental, climatic, and disturbance predictors. Resistance and resilience were modelled using a Beta distribution with a logit link function to accommodate its bounded nature between 0 and 1. The woody cover change response variable was modelled using a Gaussian distribution, reflecting the continuous nature of the change in woody vegetation over time. The Bayesian GLMs were developed and implemented using the *brms* package.
+
+Note: on a 4 core CPU with 64GB RAM, each model takes \~18 minutes.
+
+```{r, cahce=TRUE}
+# sample 70%  proportion of the full model matrix
+set.seed(2024)
+split <- rsample::initial_split(model_df2, prop = 0.7, strata = geology)
+train_df <- rsample::training(split)
+```
+
+```{r, cahce=TRUE, eval=FALSE}
+# Resistance model
+start_time <- Sys.time()
+resist_formula <- resist ~ slope + soilSand*geology + soilClay*geology + soilCarbon*geology + soilClay*woodyCov + woodyCov*fireFreq2015 + woodyCov*elephant + woodyCov*drought2015 + woodyCov*wetness2015
+resist_model <- brm(formula = resist_formula,  
+                    data = train_df,
+                    family=Beta(link="logit"),
+                    warmup = 1500, 
+                    iter = 2000, 
+                    chains = 4, 
+                    cores = 4,
+                    save_pars = save_pars(all = TRUE))
+end_time <- Sys.time()
+end_time - start_time
+saveRDS(resist_model, file = file.path(wd_results,"resist_nosa_inter.rda"))
+
+# Resilience model
+# note: we use fireFreq2015, drought2015 and wetness2015 as these match the 
+# resistance/resilience temporal period i.e. 2000 - 2015
+resil_formula <- resil ~ slope + soilSand*geology + soilClay*geology + soilCarbon*geology + soilClay*woodyCov + woodyCov*fireFreq2015 + woodyCov*elephant + woodyCov*drought2015 + woodyCov*wetness2015
+start_time <- Sys.time()
+resil_model <- brm(formula = resil_formula,  
+                   family=Beta(link="logit"),
+                   data = train_df,
+                   warmup = 1500, 
+                   iter = 2000, 
+                   chains = 4, 
+                   cores = 4,
+                   seed = 123,
+                   save_pars = save_pars(all = TRUE))
+end_time <- Sys.time()
+end_time - start_time
+saveRDS(resil_model, file = file.path(wd_results,"resil_nosa_inter.rda"))
+
+```
+
+## 6.4 Check for spatial autocorrelation
+
+Spatial autocorrelation is the term used to describe the presence of systematic spatial variation in a variable and positive spatial autocorrelation, which is most often encountered in practical situations, is the tendency for areas or sites that are close together to have similar values. We will check for the presence of spatial autocorrelation using the Moran's I test. Spatial autocorrelation is present if the *p*-value is \< 0.05. In our case, spatial autocorrelation is present thus we will account for it in section 6.5 using the residual autocovariate (RAC) approach.
+
+```{r, cache=TRUE}
+resist_model <- readRDS(file=file.path(wd_results,"resist_nosa_inter.rda"))
+resil_model <- readRDS(file=file.path(wd_results,"resil_nosa_inter.rda"))
+
+# extract a neighbourhood matrix from your model data x and y coordinates
+xy_df <- distinct(as.data.frame(cbind(train_df$ID, train_df$x, train_df$y)))
+names(xy_df) <- c("ID", "x", "y")
+coordinates(xy_df) <- ~ x + y
+knea <- knearneigh(coordinates(xy_df), longlat = FALSE)
+W_nb <- knn2nb(knea, sym=TRUE)
+W <- nb2mat(W_nb, style="B", zero.policy=FALSE)
+rownames(W) <- unique(train_df$ID)
+listW <- nb2listw(W_nb, style="W")
+
+# extract the residulas from your Bayesian GLMs
+bres_resist <- residuals(resist_model, method = "posterior_predict")[,"Estimate"]
+bres_resil <- residuals(resil_model, method = "posterior_predict")[,"Estimate"]
+
+# test for spatial autocorrelation
+moran.test(bres_resist, listW)
+moran.test(bres_resil, listW)
+
+# all models test singificant for spatial autocorrelation
+```
+
+## 6.5 Check model fit and performance
+
+Also check other performance metrics, i.e. the Bayes R-squared, leave-one-out-cross-validation information criterion (LOOIC) and the posterior predictive check plots.
+
+```{r, cache=TRUE}
+# calculate Bayes R-sqaured
+bayes_R2(resist_model)
+bayes_R2(resil_model)
+
+# calculate LOOIC
+loo_resist <- loo(resist_model, save_psis = TRUE)
+loo_resist$estimates[3]
+
+loo_resil <- loo(resil_model, save_psis = TRUE, cores = 4)
+loo_resil$estimates[3]
+
+# Plot posterior predictive check plots
+pp_resist <- pp_check(resist_model, ndraws = 100)
+pp_resist + theme_bw() + 
+  labs(x = "Resistance") +
+  ylim(0,4.5)+
+  xlim(0.1,0.9)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  theme(axis.title=element_text(size=16)) +
+  theme(axis.text=element_text(size=14)) +
+  theme(legend.text=element_text(size=14))
+
+pp_resil <- pp_check(resil_model, ndraws = 100)
+pp_resil + theme_bw() + 
+  labs(x = "Resilience") +
+  ylim(0,5.5)+
+  xlim(0.1,0.9)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  theme(axis.title=element_text(size=16)) +
+  theme(axis.text=element_text(size=14)) +
+  theme(legend.text=element_text(size=14))
+
+```
+
+## 6.6 Build Bayesian GLM RAC models
+
+The RAC approach consists of fitting a base model, calculating an autocovariate based on the residuals of the base model of each location using a mean focal operation, updating the base model linear predictor to include the calculated autocovariate and refitting using the new RAC model.
+
+```{r, cache=TRUE, eval=FALSE}
+
+# Resistance model
+# build RAC model 
+xy <- cbind(train_df$x, train_df$y)
+ext(base_r) # check extent of base raster
+# create blank raster based on extent of base raster
+rast <- raster(ncol=409, nrow = 247, ymn = 7148741.09694641, ymx = 7557741.09694641, xmn = 214375.07043509, xmx = 461375.07043509) 
+res(rast) <- 1000 # set resolution
+xy_residuals <- cbind(xy, residuals(resist_model, method = "posterior_predict")[,"Estimate"])
+rast[cellFromXY(rast, xy_residuals)] <- xy_residuals[,3]
+# calculate residuals autocovariate using focal operation
+focal_rac_rast <- focal(rast, w=matrix(1/9,nrow=3,ncol=3), fun = mean, na.rm = TRUE)
+plot(focal_rac_rast)
+focal_rac_vect <- terra::extract(rast(focal_rac_rast), vect(xy), xy=TRUE)
+names(focal_rac_vect) <- c("ID","RAC", "x", "y")
+train_df$RACresist <- focal_rac_vect[,2]
+ 
+start_time <- Sys.time()
+resist_formula_rac <- resist ~ slope + soilSand*geology + soilClay*geology + soilCarbon*geology + soilClay*woodyCov + woodyCov*fireFreq2015 + woodyCov*elephant + woodyCov*drought2015 + woodyCov*wetness2015 + RACresist
+resist_model_rac <- brm(formula = resist_formula_rac,  
+                       data = train_df,
+                       family = Beta(link="logit"),
+                       warmup = 1500, 
+                        iter = 2000, 
+                        chains = 4, 
+                        cores = 4,
+                        seed = 123,
+                        save_pars = save_pars(all = TRUE))
+end_time <- Sys.time()
+end_time - start_time
+saveRDS(resist_model_rac, file = file.path(wd_results,"resist_rac_inter.rda"))
+
+# Resilience model
+# build RAC model 
+xy <- cbind(train_df$x, train_df$y)
+ext(base_r) # check extent of base raster
+# create blank raster based on extent of base raster
+rast <- raster(ncol=409, nrow = 247, ymn = 7148741.09694641, ymx = 7557741.09694641, xmn = 214375.07043509, xmx = 461375.07043509) 
+res(rast) <- 1000 # set resolution
+xy_residuals <- cbind(xy, residuals(resil_model, method = "posterior_predict")[,"Estimate"])
+rast[cellFromXY(rast, xy_residuals)] <- xy_residuals[,3]
+# calculate residuals autocovariate using focal operation
+focal_rac_rast <- focal(rast, w=matrix(1/9,nrow=3,ncol=3), fun = mean, na.rm = TRUE)
+plot(focal_rac_rast)
+focal_rac_vect <- terra::extract(rast(focal_rac_rast), vect(xy), xy=TRUE)
+names(focal_rac_vect) <- c("ID","RAC", "x", "y")
+train_df$RACresil <- focal_rac_vect[,2]
+
+resil_formula_rac <- resil ~ slope + soilSand*geology + soilClay*geology + soilCarbon*geology + soilClay*woodyCov + woodyCov*fireFreq2015 + woodyCov*elephant + woodyCov*drought2015 + woodyCov*wetness2015 + RACresil
+start_time <- Sys.time()
+resil_model_rac <- brm(formula = resil_formula_rac,  
+                   family=Beta(link="logit"),
+                   data = train_df,
+                   warmup = 1500, 
+                   iter = 2000, 
+                   chains = 4, 
+                   cores= 4,
+                   seed=123,
+                   save_pars = save_pars(all = TRUE))
+end_time <- Sys.time()
+end_time - start_time
+saveRDS(resil_model_rac, file = file.path(wd_results,"resil_rac_inter.rda"))
+```
+
+## 6.7 Check final performance metrics
+
+Test Moran's I, Bayes R-squared, LOOIC and posterior predictive check plots of the new RAC models.
+
+```{r, cache=TRUE}
+resist_model_rac <- readRDS(file=file.path(wd_results,"resist_rac_inter.rda"))
+resil_model_rac <- readRDS(file=file.path(wd_results,"resil_rac_inter.rda"))
+
+# extract the residulas from your Bayesian GLMs
+bres_resist <- residuals(resist_model_rac, method = "posterior_predict")[,"Estimate"]
+bres_resil <- residuals(resil_model_rac, method = "posterior_predict")[,"Estimate"]
+
+# test for spatial autocorrelation
+moran.test(bres_resist, listW)
+moran.test(bres_resil, listW)
+
+# all models test insignificant for spatial autocorrelation
+
+# calculate Bayes R-sqaured
+bayes_R2(resist_model_rac)
+bayes_R2(resil_model_rac)
+
+# calculate LOOIC
+loo_resist <- loo(resist_model_rac, save_psis = TRUE)
+loo_resist$estimates[3]
+loo_resil <- loo(resil_model_rac, save_psis = TRUE, cores = 4)
+loo_resil$estimates[3]
+
+# Plot posterior predictive check plots
+pp_resist <- pp_check(resist_model_rac, ndraws = 100)
+pp_resist + theme_bw() + 
+  labs(x = "Resistance") +
+  ylim(0,4.5)+
+  xlim(0.1,0.9)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  theme(axis.title=element_text(size=16)) +
+  theme(axis.text=element_text(size=14)) +
+  theme(legend.text=element_text(size=14))
+
+pp_resil <- pp_check(resil_model_rac, ndraws = 100)
+pp_resil + theme_bw() + 
+  labs(x = "Resilience") +
+  ylim(0,5.5)+
+  xlim(0.1,0.9)+
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(), panel.background = element_blank(), axis.line = element_line(colour = "black")) + 
+  theme(axis.title=element_text(size=16)) +
+  theme(axis.text=element_text(size=14)) +
+  theme(legend.text=element_text(size=14))
+
+```
+
+```{r, cache=TRUE}
+# check model estimates
+summary(resist_model_rac)
+summary(resil_model_rac)
+```
