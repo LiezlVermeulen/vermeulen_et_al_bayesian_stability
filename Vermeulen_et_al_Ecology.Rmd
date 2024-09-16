@@ -1,5 +1,5 @@
 ---
-title: "Vermeulen_et_al_2024_Ecology"
+title: "Vermeulen_et_al_2024_Stability"
 author: "Liezl M Vermeulen"
 date: "2024-09-11"
 output:
