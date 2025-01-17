@@ -1,4 +1,4 @@
-# vermeulen_et_al_bayesian_stability
+# vermeulen_et_al_stability
 
 
 Code accompanying the paper:
